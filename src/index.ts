@@ -1,424 +1,422 @@
+// index.ts
 import z from "zod";
-import { addTwoNumber, makeNWSRequest } from "./service_helper/weather";
-import { fileReader } from "./service_helper/file_reader";
+import { addTwoNumber } from "./service_helper/weather";
 import { readFilesInDir } from "./service_helper/file_reader_in_dir";
 import { listDirectory } from "./service_helper/list_dir";
 import { MServer } from "./server/server";
 import { DatabaseConfig } from "./database/idatabaseadapter";
 import { DatabaseType } from "./database/databasefactory";
 import { DatabaseManager } from "./database/databasemanager";
+import { MHTTPServer } from "./mhttp/mhttpserver";
+import { ChartGenerator } from "./reports/chart_generator";
 
+// Choose which server to use based on environment variable
+const USE_HTTP = process.env.USE_HTTP === "true";
+const PORT = parseInt(process.env.PORT || "3000");
+const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
 
-
-const server = new MServer();
-
-async function run (){
+async function run() {
   const dbConfig: DatabaseConfig = {
-  host: "localhost",
-  port: 5432,
-  database: "testerp",
-  username: "postgres",
-  password: "owl",
-  ssl: false,
-  maxConnections: 10,
-  connectionTimeout: 10000,
-};
+    host: "localhost",
+    port: 5432,
+    database: "testerp",
+    username: "postgres",
+    password: "owl",
+    ssl: false,
+    maxConnections: 10,
+    connectionTimeout: 10000,
+  };
 
-const dbManager = DatabaseManager.getInstance();
+  const dbManager = DatabaseManager.getInstance();
 
-// ✅ FIX: Get the database adapter from the connection
-const db = await dbManager.addConnection(
-  "default",
-  DatabaseType.PostgreSQL,
-  dbConfig
-);
+  // Get the database adapter from the connection
+  const db = await dbManager.addConnection(
+    "default",
+    DatabaseType.PostgreSQL,
+    dbConfig
+  );
 
-server.registerTools(
-  "list_directory",
-  {
-    description: "Use this tool to get the names of files and folders inside a directory on the server. Call this whenever the user asks to list, show, or see files in a folder.",
-    inputSchema: z.object({
-      dir: z.string().describe("Directory path to list files from"),
-    }),
-  },
-  async ({ dir }) => {
-    try {
-      const files = await listDirectory(dir);
+  // Initialize appropriate server
+  const server = USE_HTTP ? new MHTTPServer(PORT) : new MServer();
 
-      if (files.length === 0) {
-        return {
-          content: [{ type: "text", text: "Directory is empty." }],
-        };
-      }
+  console.log(`🚀 Starting ${USE_HTTP ? 'HTTP' : 'Stdio'} MCP Server...`);
 
-      const formatted = files.map(f => `- ${f}`).join("\n");
+  // ===== REGISTER ALL TOOLS =====
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Files in ${dir}:\n${formatted}`,
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [
-          { type: "text", text: `Error listing directory: ${err.message}` },
-        ],
-        isError: true,
-      };
-    }
-  }
-);
+  server.registerTools(
+    "list_directory",
+    {
+      description: "Use this tool to get the names of files and folders inside a directory on the server. Call this whenever the user asks to list, show, or see files in a folder.",
+      inputSchema: z.object({
+        dir: z.string().describe("Directory path to list files from"),
+      }),
+    },
+    async ({ dir }: { dir: string }) => {
+      try {
+        const files = await listDirectory(dir);
 
-server.registerTools(
-  "get_current_directory",
-  {
-    description: "Use this tool ONLY when the user asks for the current working directory of the server process.",
-    inputSchema: z.object({}), // no arguments needed
-  },
-  async () => {
-    try {
-      const cwd = process.cwd();
+        if (files.length === 0) {
+          return {
+            content: [{ type: "text", text: "Directory is empty." }],
+          };
+        }
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Current working directory is: ${cwd}`,
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [
-          { type: "text", text: `Error getting directory: ${err.message}` },
-        ],
-        isError: true,
-      };
-    }
-  }
-);
+        const formatted = files.map(f => `- ${f}`).join("\n");
 
-server.registerTools(
-  "read_list_dir",
-  {
-    description: "read_all_the_list_dir",
-    inputSchema: z.object({
-      dir: z.string().describe("Directory path to scan"),
-      ext: z.string().describe("File extension to filter, e.g. .ts or .md"),
-    })
-  },
-  async ({ dir, ext }) => {
-    try {
-      let combinedText = "";
-
-      for await (const chunk of readFilesInDir(dir, ext)) {
-        combinedText += chunk;
-      }
-
-      if (!combinedText) {
-        return {
-          content: [{ type: "text", text: "No matching files found." }],
-        };
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: combinedText.slice(0, 5000), // avoid huge outputs
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [
-          { type: "text", text: `Error reading directory: ${err.message}` },
-        ],
-        isError: true,
-      };
-    }
-  }
-);
-
-server.registerTools(
-  "add_two_number",
-  {
-    description: "Get current weather for an Indian city",
-    inputSchema: z.object({
-      x: z.number().int(),
-      y: z.number().int()
-    })
-  },
-  async ({ x, y }) => {
-    const data = await addTwoNumber(x, y);
-
-    if (!data) {
-      return {
-        content: [{ type: "text", text: "Weather data not found." }],
-        isError: true
-      };
-    }
-
-    return {
-      content: [{
-        type: "text",
-        text: `Answer is ${data}`
-      }]
-    };
-  }
-);
-
-// ✅ NEW: Query work orders by status
-server.registerTools(
-  "query_workorders_by_status",
-  {
-    description: "Query work orders from the database filtered by status. Use this when the user asks about work orders with a specific status like 'show me cancelled work orders' or 'list approved work orders'. Valid statuses are: WAPPR (Waiting for Approval), APPR (Approved), INPRG (In Progress), COMP (Completed), CAN (Cancelled).",
-    inputSchema: z.object({
-      status: z.enum(['WAPPR', 'APPR', 'INPRG', 'COMP', 'CAN']).describe("Work order status to filter by"),
-    }),
-  },
-  async ({ status }) => {
-    try {
-      // ✅ FIX: Get the connection from dbManager
-      const dbConnection = dbManager.getConnection("default");
-      
-      // Query the database
-      const result = await dbConnection.query(
-        "SELECT * FROM workorder WHERE status=$1 ORDER BY targetstartdate DESC",
-        [status]
-      );
-
-      if (result.rowCount === 0) {
         return {
           content: [
-            { 
-              type: "text", 
-              text: `No work orders found with status '${status}'.` 
-            }
+            {
+              type: "text",
+              text: `Files in ${dir}:\n${formatted}`,
+            },
           ],
         };
-      }
-
-      // Format the results
-      const statusNames: Record<string, string> = {
-        'WAPPR': 'Waiting for Approval',
-        'APPR': 'Approved',
-        'INPRG': 'In Progress',
-        'COMP': 'Completed',
-        'CAN': 'Cancelled'
-      };
-
-      let formatted = `Found ${result.rowCount} work order(s) with status '${statusNames[status]}':\n\n`;
-      
-      result.rows.forEach((wo: any, index: number) => {
-        formatted += `${index + 1}. ${wo.wonum} - ${wo.description}\n`;
-        formatted += `   Status: ${wo.status}`;
-        if (wo.pmnum) formatted += ` | PM#: ${wo.pmnum}`;
-        formatted += `\n   Start: ${new Date(wo.targetstartdate).toLocaleString()}`;
-        formatted += `\n   Finish: ${new Date(wo.targetfinishdate).toLocaleString()}\n\n`;
-      });
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: formatted,
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [
-          { type: "text", text: `Error querying work orders: ${err.message}` },
-        ],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ✅ NEW: Get all work orders (no filter)
-server.registerTools(
-  "get_all_workorders",
-  {
-    description: "Get all work orders from the database. Use this when the user asks to see all work orders, list all work orders, or show the complete work order list.",
-    inputSchema: z.object({}),
-  },
-  async () => {
-    try {
-      // ✅ FIX: Get the connection from dbManager
-      const dbConnection = dbManager.getConnection("default");
-      
-      const result = await dbConnection.query(
-        "SELECT * FROM workorder ORDER BY status, targetstartdate DESC"
-      );
-
-      if (result.rowCount === 0) {
+      } catch (err: any) {
         return {
           content: [
-            { type: "text", text: "No work orders found in the database." }
+            { type: "text", text: `Error listing directory: ${err.message}` },
           ],
+          isError: true,
         };
       }
-
-      // Get counts by status
-      const statusCounts = await dbConnection.query(`
-        SELECT status, COUNT(*) as count 
-        FROM workorder 
-        GROUP BY status 
-        ORDER BY status
-      `);
-
-      let formatted = `Total Work Orders: ${result.rowCount}\n\n`;
-      formatted += `Status Breakdown:\n`;
-      statusCounts.rows.forEach((row: any) => {
-        formatted += `- ${row.status}: ${row.count}\n`;
-      });
-      formatted += `\n`;
-
-      // Show first 10 work orders
-      const limit = Math.min(10, result.rowCount);
-      formatted += `Showing first ${limit} work orders:\n\n`;
-      
-      result.rows.slice(0, 10).forEach((wo: any, index: number) => {
-        formatted += `${index + 1}. ${wo.wonum} - ${wo.description}\n`;
-        formatted += `   Status: ${wo.status}`;
-        if (wo.pmnum) formatted += ` | PM#: ${wo.pmnum}`;
-        formatted += `\n   Start: ${new Date(wo.targetstartdate).toLocaleString()}\n\n`;
-      });
-
-      if (result.rowCount > 10) {
-        formatted += `... and ${result.rowCount - 10} more work orders.\n`;
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: formatted,
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [
-          { type: "text", text: `Error fetching work orders: ${err.message}` },
-        ],
-        isError: true,
-      };
     }
-  }
-);
+  );
 
-// ✅ NEW: Get work order by number
-server.registerTools(
-  "get_workorder_by_number",
-  {
-    description: "Get a specific work order by its work order number. Use this when the user asks for details about a specific work order like 'show me WO-2024-001' or 'get details for work order WO-2024-005'.",
-    inputSchema: z.object({
-      wonum: z.string().describe("Work order number (e.g., WO-2024-001)"),
-    }),
-  },
-  async ({ wonum }) => {
-    try {
-      // ✅ FIX: Get the connection from dbManager
-      const dbConnection = dbManager.getConnection("default");
-      
-      const result = await dbConnection.query(
-        "SELECT * FROM workorder WHERE wonum=$1",
-        [wonum]
-      );
+  server.registerTools(
+    "get_current_directory",
+    {
+      description: "Use this tool ONLY when the user asks for the current working directory of the server process.",
+      inputSchema: z.object({}),
+    },
+    async () => {
+      try {
+        const cwd = process.cwd();
 
-      if (result.rowCount === 0) {
         return {
           content: [
-            { 
-              type: "text", 
-              text: `Work order '${wonum}' not found.` 
-            }
+            {
+              type: "text",
+              text: `Current working directory is: ${cwd}`,
+            },
           ],
+        };
+      } catch (err: any) {
+        return {
+          content: [
+            { type: "text", text: `Error getting directory: ${err.message}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.registerTools(
+    "read_list_dir",
+    {
+      description: "Read all files in a directory with a specific extension and return their contents.",
+      inputSchema: z.object({
+        dir: z.string().describe("Directory path to scan"),
+        ext: z.string().describe("File extension to filter, e.g. .ts or .md"),
+      })
+    },
+    async ({ dir, ext }: { dir: string; ext: string }) => {
+      try {
+        let combinedText = "";
+
+        for await (const chunk of readFilesInDir(dir, ext)) {
+          combinedText += chunk;
+        }
+
+        if (!combinedText) {
+          return {
+            content: [{ type: "text", text: "No matching files found." }],
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: combinedText.slice(0, 5000),
+            },
+          ],
+        };
+      } catch (err: any) {
+        return {
+          content: [
+            { type: "text", text: `Error reading directory: ${err.message}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.registerTools(
+    "add_two_number",
+    {
+      description: "Add two numbers together and return the result.",
+      inputSchema: z.object({
+        x: z.number().int().describe("First number"),
+        y: z.number().int().describe("Second number")
+      })
+    },
+    async ({ x, y }: { x: number; y: number }) => {
+      const data = await addTwoNumber(x, y);
+
+      if (!data) {
+        return {
+          content: [{ type: "text", text: "Calculation failed." }],
+          isError: true
         };
       }
 
-      const wo = result.rows[0];
-      
-      const formatted = `Work Order Details:\n\n` +
-        `Number: ${wo.wonum}\n` +
-        `Description: ${wo.description}\n` +
-        `Status: ${wo.status}\n` +
-        `PM Number: ${wo.pmnum || 'N/A'}\n` +
-        `Target Start: ${new Date(wo.targetstartdate).toLocaleString()}\n` +
-        `Target Finish: ${new Date(wo.targetfinishdate).toLocaleString()}\n` +
-        `Created: ${new Date(wo.created_at).toLocaleString()}\n` +
-        `Updated: ${new Date(wo.updated_at).toLocaleString()}`;
-
       return {
-        content: [
-          {
-            type: "text",
-            text: formatted,
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [
-          { type: "text", text: `Error fetching work order: ${err.message}` },
-        ],
-        isError: true,
+        content: [{
+          type: "text",
+          text: `Answer is ${data}`
+        }]
       };
     }
-  }
-);
+  );
 
-// ✅ NEW: Get work order statistics
-server.registerTools(
-  "get_workorder_stats",
-  {
-    description: "Get statistics about work orders including counts by status, upcoming work orders, and overdue items. Use this when the user asks for work order statistics, summary, or overview.",
-    inputSchema: z.object({}),
-  },
-  async () => {
-    try {
-      // ✅ FIX: Get the connection from dbManager
-      const dbConnection = dbManager.getConnection("default");
-      
-      // Get counts by status
-      const statusStats = await dbConnection.query(`
-        SELECT status, COUNT(*) as count 
-        FROM workorder 
-        GROUP BY status 
-        ORDER BY status
-      `);
+  // ===== WORK ORDER TOOLS =====
 
-      // Get total count
-      const totalResult = await dbConnection.query(`SELECT COUNT(*) as total FROM workorder`);
-      const total = totalResult.rows[0].total;
+  server.registerTools(
+    "query_workorders_by_status",
+    {
+      description: "Query work orders from the database filtered by status. Use this when the user asks about work orders with a specific status like 'show me cancelled work orders' or 'list approved work orders'. Valid statuses are: WAPPR (Waiting for Approval), APPR (Approved), INPRG (In Progress), COMP (Completed), CAN (Cancelled).",
+      inputSchema: z.object({
+        status: z.enum(['WAPPR', 'APPR', 'INPRG', 'COMP', 'CAN']).describe("Work order status to filter by"),
+      }),
+    },
+    async ({ status }: { status: string }) => {
+      try {
+        const dbConnection = dbManager.getConnection("default");
 
-      // Get upcoming work orders (next 7 days)
-      const upcomingResult = await dbConnection.query(`
-        SELECT COUNT(*) as count 
-        FROM workorder 
-        WHERE targetstartdate BETWEEN NOW() AND NOW() + INTERVAL '7 days'
-        AND status NOT IN ('COMP', 'CAN')
-      `);
+        const result = await dbConnection.query(
+          "SELECT * FROM workorder WHERE status=$1 ORDER BY targetstartdate DESC",
+          [status]
+        );
 
-      // Get overdue work orders
-      const overdueResult = await dbConnection.query(`
-        SELECT COUNT(*) as count 
-        FROM workorder 
-        WHERE targetfinishdate < NOW()
-        AND status NOT IN ('COMP', 'CAN')
-      `);
+        if (result.rowCount === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `No work orders found with status '${status}'.`
+              }
+            ],
+          };
+        }
 
-      let formatted = `📊 Work Order Statistics\n\n`;
-      formatted += `Total Work Orders: ${total}\n\n`;
-      
-      formatted += `Status Breakdown:\n`;
-      statusStats.rows.forEach((row: any) => {
+        const statusNames: Record<string, string> = {
+          'WAPPR': 'Waiting for Approval',
+          'APPR': 'Approved',
+          'INPRG': 'In Progress',
+          'COMP': 'Completed',
+          'CAN': 'Cancelled'
+        };
+
+        let formatted = `Found ${result.rowCount} work order(s) with status '${statusNames[status]}':\n\n`;
+
+        result.rows.forEach((wo: any, index: number) => {
+          formatted += `${index + 1}. **${wo.wonum}** - ${wo.description}\n`;
+          formatted += `   - Status: ${wo.status}`;
+          if (wo.pmnum) formatted += ` | PM#: ${wo.pmnum}`;
+          formatted += `\n   - Start: ${new Date(wo.targetstartdate).toLocaleString()}`;
+          formatted += `\n   - Finish: ${new Date(wo.targetfinishdate).toLocaleString()}\n\n`;
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: formatted,
+            },
+          ],
+        };
+      } catch (err: any) {
+        return {
+          content: [
+            { type: "text", text: `Error querying work orders: ${err.message}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.registerTools(
+    "get_all_workorders",
+    {
+      description: "Get all work orders from the database. Use this when the user asks to see all work orders, list all work orders, or show the complete work order list.",
+      inputSchema: z.object({}),
+    },
+    async () => {
+      try {
+        const dbConnection = dbManager.getConnection("default");
+
+        const result = await dbConnection.query(
+          "SELECT * FROM workorder ORDER BY status, targetstartdate DESC"
+        );
+
+        if (result.rowCount === 0) {
+          return {
+            content: [
+              { type: "text", text: "No work orders found in the database." }
+            ],
+          };
+        }
+
+        const statusCounts = await dbConnection.query(`
+          SELECT status, COUNT(*) as count 
+          FROM workorder 
+          GROUP BY status 
+          ORDER BY status
+        `);
+
+        let formatted = `## 📋 All Work Orders\n\n`;
+        formatted += `**Total:** ${result.rowCount} work orders\n\n`;
+
+        formatted += `### Status Breakdown:\n`;
+        statusCounts.rows.forEach((row: any) => {
+          formatted += `- **${row.status}**: ${row.count}\n`;
+        });
+        formatted += `\n---\n\n`;
+
+        const limit = Math.min(10, result.rowCount);
+        formatted += `### Showing first ${limit} work orders:\n\n`;
+
+        result.rows.slice(0, 10).forEach((wo: any, index: number) => {
+          formatted += `**${index + 1}. ${wo.wonum}** - ${wo.description}\n`;
+          formatted += `   - Status: ${wo.status}`;
+          if (wo.pmnum) formatted += ` | PM#: ${wo.pmnum}`;
+          formatted += `\n   - Start: ${new Date(wo.targetstartdate).toLocaleString()}\n\n`;
+        });
+
+        if (result.rowCount > 10) {
+          formatted += `\n*... and ${result.rowCount - 10} more work orders.*\n`;
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: formatted,
+            },
+          ],
+        };
+      } catch (err: any) {
+        return {
+          content: [
+            { type: "text", text: `Error fetching work orders: ${err.message}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.registerTools(
+    "get_workorder_by_number",
+    {
+      description: "Get a specific work order by its work order number. Use this when the user asks for details about a specific work order like 'show me WO-2024-001' or 'get details for work order WO-2024-005'.",
+      inputSchema: z.object({
+        wonum: z.string().describe("Work order number (e.g., WO-2024-001)"),
+      }),
+    },
+    async ({ wonum }: { wonum: string }) => {
+      try {
+        const dbConnection = dbManager.getConnection("default");
+
+        const result = await dbConnection.query(
+          "SELECT * FROM workorder WHERE wonum=$1",
+          [wonum]
+        );
+
+        if (result.rowCount === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Work order '${wonum}' not found.`
+              }
+            ],
+          };
+        }
+
+        const wo = result.rows[0];
+
+        const formatted = `## 🔧 Work Order Details\n\n` +
+          `**Number:** ${wo.wonum}\n` +
+          `**Description:** ${wo.description}\n` +
+          `**Status:** ${wo.status}\n` +
+          `**PM Number:** ${wo.pmnum || 'N/A'}\n\n` +
+          `### Timeline:\n` +
+          `- **Target Start:** ${new Date(wo.targetstartdate).toLocaleString()}\n` +
+          `- **Target Finish:** ${new Date(wo.targetfinishdate).toLocaleString()}\n` +
+          `- **Created:** ${new Date(wo.created_at).toLocaleString()}\n` +
+          `- **Updated:** ${new Date(wo.updated_at).toLocaleString()}`;
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: formatted,
+            },
+          ],
+        };
+      } catch (err: any) {
+        return {
+          content: [
+            { type: "text", text: `Error fetching work order: ${err.message}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.registerTools(
+    "get_workorder_stats",
+    {
+      description: "Get statistics about work orders including counts by status, upcoming work orders, and overdue items. Use this when the user asks for work order statistics, summary, or overview.",
+      inputSchema: z.object({}),
+    },
+    async () => {
+      try {
+        const dbConnection = dbManager.getConnection("default");
+
+        const statusStats = await dbConnection.query(`
+          SELECT status, COUNT(*) as count 
+          FROM workorder 
+          GROUP BY status 
+          ORDER BY status
+        `);
+
+        const totalResult = await dbConnection.query(`SELECT COUNT(*) as total FROM workorder`);
+        const total = totalResult.rows[0].total;
+
+        const upcomingResult = await dbConnection.query(`
+          SELECT COUNT(*) as count 
+          FROM workorder 
+          WHERE targetstartdate BETWEEN NOW() AND NOW() + INTERVAL '7 days'
+          AND status NOT IN ('COMP', 'CAN')
+        `);
+
+        const overdueResult = await dbConnection.query(`
+          SELECT COUNT(*) as count 
+          FROM workorder 
+          WHERE targetfinishdate < NOW()
+          AND status NOT IN ('COMP', 'CAN')
+        `);
+
+        let formatted = `## 📊 Work Order Statistics\n\n`;
+        formatted += `**Total Work Orders:** ${total}\n\n`;
+
+        formatted += `### Status Breakdown:\n`;
         const statusNames: any = {
           'WAPPR': 'Waiting for Approval',
           'APPR': 'Approved',
@@ -426,109 +424,225 @@ server.registerTools(
           'COMP': 'Completed',
           'CAN': 'Cancelled'
         };
-        formatted += `- ${statusNames[row.status] || row.status}: ${row.count}\n`;
-      });
 
-      formatted += `\n`;
-      formatted += `📅 Upcoming (Next 7 days): ${upcomingResult.rows[0].count}\n`;
-      formatted += `⚠️  Overdue: ${overdueResult.rows[0].count}\n`;
+        statusStats.rows.forEach((row: any) => {
+          formatted += `- **${statusNames[row.status] || row.status}**: ${row.count}\n`;
+        });
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: formatted,
-          },
-        ],
-      };
-    } catch (err: any) {
-      return {
-        content: [
-          { type: "text", text: `Error fetching statistics: ${err.message}` },
-        ],
-        isError: true,
-      };
+        formatted += `\n### Time-based Summary:\n`;
+        formatted += `- 📅 **Upcoming (Next 7 days):** ${upcomingResult.rows[0].count}\n`;
+        formatted += `- ⚠️  **Overdue:** ${overdueResult.rows[0].count}\n`;
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: formatted,
+            },
+          ],
+        };
+      } catch (err: any) {
+        return {
+          content: [
+            { type: "text", text: `Error fetching statistics: ${err.message}` },
+          ],
+          isError: true,
+        };
+      }
     }
+  );
+
+  // 🔥 CHART GENERATION TOOL
+  server.registerTools(
+    "generate_workorder_report_with_charts",
+    {
+      description: "Generate a visual report with charts for work orders. Creates pie charts, bar charts showing status distribution, trends over time, and priority breakdown. Use this when the user asks for a visual report, dashboard, or charts.",
+      inputSchema: z.object({
+        days: z.number().int().optional().describe("Number of days to look back (default: 30)"),
+      }),
+    },
+    async ({ days = 30 }: { days?: number }) => {
+      try {
+        console.log(`📊 Starting chart generation for ${days} days...`);
+        
+        const dbConnection = dbManager.getConnection("default");
+        const chartGenerator = new ChartGenerator('./public/charts');
+
+        // Get date range
+        const startDate = new Date();
+        startDate.setDate(startDate.getDate() - days);
+
+        // Query work orders
+        const result = await dbConnection.query(
+          `SELECT * FROM workorder 
+           WHERE created_at >= $1 
+           ORDER BY created_at DESC`,
+          [startDate]
+        );
+
+        console.log(`📦 Found ${result.rowCount} work orders`);
+
+        if (result.rowCount === 0) {
+          return {
+            content: [
+              { type: "text", text: `No work orders found in the last ${days} days.` }
+            ],
+          };
+        }
+
+        // Calculate statistics
+        const statusCounts: Record<string, number> = {};
+        const priorityCounts: Record<string, number> = {};
+        const dailyCounts: Record<string, number> = {};
+
+        result.rows.forEach((wo: any) => {
+          // Count by status
+          statusCounts[wo.status] = (statusCounts[wo.status] || 0) + 1;
+
+          // Count by priority
+          const priority = wo.priority || 'N/A';
+          priorityCounts[priority] = (priorityCounts[priority] || 0) + 1;
+
+          // Count by day
+          const date = new Date(wo.created_at).toLocaleDateString();
+          dailyCounts[date] = (dailyCounts[date] || 0) + 1;
+        });
+
+        console.log('📈 Generating charts...');
+
+        // Generate charts
+        const timestamp = Date.now();
+
+        // 1. Status Distribution Pie Chart
+        const statusChartPath = await chartGenerator.generatePieChart(
+          {
+            labels: Object.keys(statusCounts),
+            data: Object.values(statusCounts),
+            backgroundColor: ['#28a745', '#ffc107', '#dc3545', '#007bff', '#6c757d'],
+          },
+          'Work Order Status Distribution',
+          `status-pie-${timestamp}.png`
+        );
+        console.log(`✅ Status chart: ${statusChartPath}`);
+
+        // 2. Priority Distribution Bar Chart
+        const priorityChartPath = await chartGenerator.generateBarChart(
+          {
+            labels: Object.keys(priorityCounts),
+            data: Object.values(priorityCounts),
+            backgroundColor: ['#dc3545', '#ffc107', '#28a745', '#6c757d'],
+            label: 'Count',
+          },
+          'Work Orders by Priority',
+          `priority-bar-${timestamp}.png`
+        );
+        console.log(`✅ Priority chart: ${priorityChartPath}`);
+
+        // 3. Timeline Line Chart
+        const sortedDates = Object.keys(dailyCounts).sort();
+        const timelineChartPath = await chartGenerator.generateLineChart(
+          {
+            labels: sortedDates,
+            data: sortedDates.map(date => dailyCounts[date]),
+            label: 'Work Orders Created',
+          },
+          `Work Orders Timeline (Last ${days} Days)`,
+          `timeline-line-${timestamp}.png`
+        );
+        console.log(`✅ Timeline chart: ${timelineChartPath}`);
+
+        // 4. Status Doughnut Chart (alternative view)
+        const statusDoughnutPath = await chartGenerator.generateDoughnutChart(
+          {
+            labels: Object.keys(statusCounts),
+            data: Object.values(statusCounts),
+            backgroundColor: ['#28a745', '#ffc107', '#dc3545', '#007bff', '#6c757d'],
+          },
+          'Work Order Status Overview',
+          `status-doughnut-${timestamp}.png`
+        );
+        console.log(`✅ Doughnut chart: ${statusDoughnutPath}`);
+
+        // 🔥 Use absolute URLs with server URL
+        const statusChart = `${SERVER_URL}${statusChartPath}`;
+        const priorityChart = `${SERVER_URL}${priorityChartPath}`;
+        const timelineChart = `${SERVER_URL}${timelineChartPath}`;
+        const statusDoughnut = `${SERVER_URL}${statusDoughnutPath}`;
+
+        console.log('🎨 Chart URLs generated successfully');
+
+        // Generate HTML report
+        const htmlReport = `
+## 📊 Work Order Visual Report
+
+**Period:** Last ${days} days  
+**Total Work Orders:** ${result.rowCount}  
+**Generated:** ${new Date().toLocaleString()}
+
+---
+
+### Status Distribution
+![Status Chart](${statusChart})
+
+### Priority Breakdown
+![Priority Chart](${priorityChart})
+
+### Timeline
+![Timeline Chart](${timelineChart})
+
+### Status Overview (Doughnut)
+![Status Doughnut](${statusDoughnut})
+
+---
+
+### Summary Statistics:
+
+**Status Breakdown:**
+${Object.entries(statusCounts).map(([status, count]) => `- **${status}**: ${count}`).join('\n')}
+
+**Priority Breakdown:**
+${Object.entries(priorityCounts).map(([priority, count]) => `- **${priority}**: ${count}`).join('\n')}
+
+---
+
+*Charts are saved and available. Click on any chart above to view in full size.*
+        `;
+
+        console.log('✅ Report generation complete!');
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: htmlReport,
+            },
+          ],
+        };
+      } catch (err: any) {
+        console.error('❌ Chart generation error:', err);
+        return {
+          content: [
+            { type: "text", text: `Error generating report: ${err.message}\n\nStack: ${err.stack}` },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // Start the server
+  await server.start();
+
+  // Log success
+  console.log("✅ All tools registered successfully!");
+  if (USE_HTTP) {
+    console.log(`\n🌐 Open your browser at: http://localhost:${PORT}`);
+    console.log(`📊 Server URL for charts: ${SERVER_URL}`);
   }
-);
-
-server.start();
-
 }
-run()
 
-
-
-// import { DatabaseType } from "./database/databasefactory";
-// import { DatabaseManager } from "./database/databasemanager";
-// import { DatabaseConfig } from "./database/idatabaseadapter";
-// import { migrations } from "./migration_manager/migration";
-// import { MigrationManager } from "./migration_manager/migrationmanager";
-// import { S3_Client } from "./s3_client/s3_client"
-// import dotenv from "dotenv";
-// dotenv.config();
-
-// async function start() {
-//   // const client = new S3_Client("nadeem-bucket-9891", "processed/");
-
-//   // await client.processFilesInBatches(5, async (fileKey, paragraph) => {
-
-//   //   console.log("Embedding:", paragraph);
-
-
-//   // });
-
-//   const dbManager=DatabaseManager.getInstance();
-//   await dbManager.addConnection("postgresql",DatabaseType.PostgreSQL,{
-//     host: process.env.MYSQL_HOST || 'localhost',
-//         port: parseInt(process.env.POSTGRES_HOST || '5432'),
-//         database: process.env.POSTGRES_DATABASE || 'myapp',
-//         username: process.env.POSTGRES_USERNAME || 'root',
-//         password: process.env.POSTGRES_PASSWORD || 'password',
-//         maxConnections: 10,
-//   });
-
-//   console.log(dbManager.hasConnection("postgresql"))
-
-
-
-// }
-
-// start()
-
-// const dbConfig: DatabaseConfig = {
-//   host: "localhost",
-//   port: 5432,
-//   database: "testerp",
-//   username: "postgres",
-//   password: "owl",
-//   ssl: false,
-//   maxConnections: 10,
-//   connectionTimeout: 10000,
-// };
-
-// async function run() {
-//   try {
-//     const dbManager = DatabaseManager.getInstance();
-
-//     const db = await dbManager.addConnection(
-//       "default",
-//       DatabaseType.PostgreSQL,
-//       dbConfig
-//     );
-
-//     // const migrationManager = new MigrationManager(db);
-
-//     // const results = await migrationManager.migrateUp(migrations);
-
-//     // console.log("Migration Results:", results);
-//     console.log(await db.query("SELECT * FROM workorder WHERE status='CAN'"));
-
-//     await dbManager.closeAll();
-
-//   } catch (error) {
-//     console.error("Migration failed:", error);
-//   }
-// }
-
-// run();
+// Run the server
+run().catch((error) => {
+  console.error("❌ Server startup failed:", error);
+  process.exit(1);
+});

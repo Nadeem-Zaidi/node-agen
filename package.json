@@ -3,10 +3,11 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "ts-node src/index.ts",
+    "dev:http": "cross-env USE_HTTP=true ts-node src/index.ts",
     "build": "tsc",
-    "start": "node dist/server.ts",
-    "dev": "nodemon --watch src --exec ts-node src/index.ts"
+    "start": "node dist/index.js",
+    "start:http": "cross-env USE_HTTP=true node dist/index.js"
   },
   "keywords": [],
   "author": "",
@@ -16,18 +17,26 @@
     "@aws-sdk/client-s3": "^3.985.0",
     "@modelcontextprotocol/sdk": "^1.25.3",
     "@qdrant/qdrant-js": "^1.16.2",
-    "@types/node": "^25.0.10",
     "@types/pg": "^8.16.0",
+    "canvas": "^3.2.1",
+    "chart.js": "^4.5.1",
+    "cors": "^2.8.6",
     "dotenv": "^17.2.3",
+    "express": "^5.2.1",
     "nodeman": "^1.1.2",
     "nodemon": "^3.1.11",
     "openai": "^6.16.0",
     "pg": "^8.18.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.3",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@types/dotenv": "^6.1.1"
+    "@types/cors": "^2.8.19",
+    "@types/dotenv": "^6.1.1",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.2.3",
+    "cross-env": "^10.1.0",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.9.3"
   }
 }
