@@ -40,7 +40,6 @@
 
 import { ILLM, LLMConfig } from "../interfaces/illm";
 import { OpenAIProvider } from "../llms/open_ai";
-import { GemmaProvider } from "../llms/gemma";
 
 export type LLMProvider = "openai" | "ollama" | "anthropic" | "gemma";
 
@@ -50,9 +49,9 @@ export class LLMFactory {
             case "openai":
                 return new OpenAIProvider(config);
 
-            case "ollama":
-            case "gemma":
-                return new GemmaProvider(config);
+            // case "ollama":
+            // case "gemma":
+            //     return new GemmaProvider(config);
 
             default:
                 throw new Error(`Unknown LLM provider: ${provider}`);

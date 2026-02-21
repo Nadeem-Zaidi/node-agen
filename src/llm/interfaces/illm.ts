@@ -2,9 +2,9 @@
 
 export interface LLMMessage {
     role: 'system' | 'user' | 'assistant' | 'tool';
-    content: string;
-    tool_call_id?: string;
+    content: string | any[];  // ✅ allow array for vision messages
     tool_calls?: ToolCall[];
+    tool_call_id?: string;
 }
 
 export interface ToolCall {

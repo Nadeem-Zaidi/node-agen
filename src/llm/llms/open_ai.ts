@@ -35,42 +35,42 @@ export class OpenAIProvider implements ILLM {
         return this.config.model;
     }
     private toOpenAIMessages(
-        messages: LLMMessage[]
-    ): OpenAI.Chat.ChatCompletionMessageParam[] {
-        return messages.map((msg) => {
-            if (msg.role === 'tool') {
-                return {
-                    role: 'tool' as const,
-                    content: msg.content,
-                    tool_call_id: msg.tool_call_id!,
-                };
-            }
+    messages: LLMMessage[]
+): OpenAI.Chat.ChatCompletionMessageParam[] {
+    return messages.map((msg) => {
+        if (msg.role === 'tool') {
+            return {
+                role: 'tool' as const,
+                content: msg.content as string,
+                tool_call_id: msg.tool_call_id!,
+            };
+        }
 
-            if (msg.tool_calls) {
-                const functionToolCalls = msg.tool_calls
-                    .filter(tc => tc.type === 'function')
-                    .map(tc => ({
-                        id: tc.id,
-                        type: 'function' as const,
-                        function: {
-                            name: tc.function.name,
-                            arguments: tc.function.arguments,
-                        },
-                    }));
-
-                return {
-                    role: 'assistant' as const,
-                    content: msg.content,
-                    tool_calls: functionToolCalls,
-                };
-            }
+        if (msg.tool_calls) {
+            const functionToolCalls = msg.tool_calls
+                .filter(tc => tc.type === 'function')
+                .map(tc => ({
+                    id: tc.id,
+                    type: 'function' as const,
+                    function: {
+                        name: tc.function.name,
+                        arguments: tc.function.arguments,
+                    },
+                }));
 
             return {
-                role: msg.role as 'system' | 'user' | 'assistant',
-                content: msg.content,
+                role: 'assistant' as const,
+                content: msg.content as string,
+                tool_calls: functionToolCalls,
             };
-        });
-    }
+        }
+
+        return {
+            role: msg.role as 'system' | 'user' | 'assistant',
+            content: msg.content as any, // ✅ allows string or array (vision)
+        };
+    });
+}
 
     async chat(messages: LLMMessage[], tools?: Tool[]): Promise<LLMResponse> {
         const openAIMessages = this.toOpenAIMessages(messages);

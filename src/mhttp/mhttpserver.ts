@@ -35,7 +35,8 @@ export class MHTTPServer implements IServer {
             credentials: false,
         }));
 
-        this.app.use(express.json());
+        this.app.use(express.json({ limit: '50mb' })); // ✅ increased limit for base64 images
+        this.app.use(express.urlencoded({ limit: '50mb', extended: true }));
         this.app.use(express.static('public'));
 
         this.server = new McpServer({
@@ -59,22 +60,24 @@ export class MHTTPServer implements IServer {
             });
         });
 
-        // 🔥 Main chat endpoint with LLM interface
+        // ✅ Main chat endpoint with image support
         this.app.post("/api/chat/chat_stream", async (req: Request, res: Response) => {
-            const { question, history } = req.body;
+            const { question, history, images } = req.body;
 
-            if (!question) {
-                return res.status(400).json({ error: "Question is required" });
+            // ✅ Allow image-only messages (no text required)
+            if (!question && (!images || images.length === 0)) {
+                return res.status(400).json({ error: "Question or images are required" });
             }
 
             console.log(`💬 User question: ${question}`);
+            console.log(`🖼️  Images received: ${images?.length || 0}`);
 
             res.setHeader("Content-Type", "text/event-stream");
             res.setHeader("Cache-Control", "no-cache");
             res.setHeader("Connection", "keep-alive");
 
             try {
-                await this.handleWithLLMAndMCP(question, history || [], res);
+                await this.handleWithLLMAndMCP(question || "", history || [], images || [], res);
             } catch (error: any) {
                 console.error("❌ Chat error:", error);
                 res.write(`data: ${JSON.stringify("Sorry, I encountered an error: " + error.message)}\n\n`);
@@ -101,13 +104,14 @@ export class MHTTPServer implements IServer {
         });
     }
 
-    // 🔥 Refactored to use LLM interface
+    // ✅ Updated to accept images
     private async handleWithLLMAndMCP(
         question: string,
         history: Array<{ role: string; content: string }>,
+        images: Array<{ data: string; mediaType: string }>,
         res: Response
     ): Promise<void> {
-        // 🔥 Build tools in generic format
+
         const tools: Tool[] = Array.from(this.registeredTools.entries()).map(
             ([name, tool]) => ({
                 type: 'function' as const,
@@ -121,7 +125,29 @@ export class MHTTPServer implements IServer {
 
         console.log(`🤖 Sending to ${this.llm.getProvider()} with ${tools.length} tools available`);
 
-        // 🔥 Build messages in generic format
+        // ✅ Build vision-compatible user message content
+        const userMessageContent: any[] = [];
+
+        // Add images first if present
+        if (images && images.length > 0) {
+            images.forEach(img => {
+                userMessageContent.push({
+                    type: "image_url",
+                    image_url: {
+                        url: `data:${img.mediaType};base64,${img.data}`,
+                    },
+                });
+            });
+        }
+
+        // Add text content if present
+        if (question) {
+            userMessageContent.push({
+                type: "text",
+                text: question,
+            });
+        }
+
         const messages: LLMMessage[] = [
             {
                 role: 'system',
@@ -132,14 +158,15 @@ export class MHTTPServer implements IServer {
                             Always provide helpful, accurate responses based on the actual data from the tools.
                             Format your responses clearly using markdown.`,
             },
-            // 🔥 Include conversation history
+            // Include conversation history
             ...history.map((msg) => ({
                 role: msg.role as 'user' | 'assistant',
                 content: msg.content,
             })),
             {
                 role: 'user' as const,
-                content: question,
+                // ✅ Use array content when images are present, plain string otherwise
+                content: images.length > 0 ? userMessageContent : question,
             },
         ];
 
@@ -151,6 +178,7 @@ export class MHTTPServer implements IServer {
                 if (chunk.content) {
                     res.write(`data: ${JSON.stringify(chunk.content)}\n\n`);
                 }
+
                 if (chunk.isToolCall && chunk.toolCalls) {
                     // Add assistant message with tool calls
                     messages.push({
@@ -174,7 +202,6 @@ export class MHTTPServer implements IServer {
                         console.log(`🔧 Calling tool: ${toolName}`);
                         console.log(`📥 Tool input:`, toolInput);
 
-                        // Stream tool usage indicator
                         const toolMsg = `\n\n*🔧 Using tool: ${toolName}...*\n\n`;
                         res.write(`data: ${JSON.stringify(toolMsg)}\n\n`);
 
@@ -182,9 +209,7 @@ export class MHTTPServer implements IServer {
 
                         try {
                             const tool = this.registeredTools.get(toolName);
-                            if (!tool) {
-                                throw new Error(`Tool ${toolName} not found`);
-                            }
+                            if (!tool) throw new Error(`Tool ${toolName} not found`);
 
                             const toolResult = await tool.func(toolInput);
                             toolResultContent = toolResult.content[0]?.text || "No result";
@@ -195,7 +220,6 @@ export class MHTTPServer implements IServer {
                             toolResultContent = `Error executing tool: ${toolError.message}`;
                         }
 
-                        // Add tool result to messages
                         messages.push({
                             role: 'tool',
                             content: toolResultContent,
@@ -204,11 +228,9 @@ export class MHTTPServer implements IServer {
                     }
                 }
 
-                // Check if we're done
                 if (chunk.isDone) {
-                    // If this was a tool call, continue the loop to get LLM's response
                     continueLoop = chunk.isToolCall;
-                    break; 
+                    break;
                 }
             }
         }
@@ -221,14 +243,10 @@ export class MHTTPServer implements IServer {
     private zodToJsonSchema(zodSchema: ZodTypeAny): Record<string, unknown> {
         try {
             const schemaDef = zodSchema._def as any;
-            // const shape = schemaDef?.shape?.();
-            const shape = schemaDef?.shape; // ✅ no parentheses
+            const shape = schemaDef?.shape;
 
             if (!shape) {
-                return {
-                    type: "object",
-                    properties: {},
-                };
+                return { type: "object", properties: {} };
             }
 
             const properties: Record<string, Record<string, unknown>> = {};
@@ -250,75 +268,42 @@ export class MHTTPServer implements IServer {
                         const innerDef = fieldDef?.innerType?._def;
                         const innerTypeName = innerDef?.typeName as string;
                         switch (innerTypeName) {
-                            case "ZodNumber":
-                                fieldType = "number";
-                                break;
-                            case "ZodBoolean":
-                                fieldType = "boolean";
-                                break;
+                            case "ZodNumber":   fieldType = "number";  break;
+                            case "ZodBoolean":  fieldType = "boolean"; break;
+                            case "ZodArray":    fieldType = "array";   break;
                             case "ZodEnum":
                                 fieldType = "string";
                                 fieldSchema["enum"] = innerDef?.values;
                                 break;
-                            case "ZodArray":
-                                fieldType = "array";
-                                break;
-                            default:
-                                fieldType = "string";
+                            default: fieldType = "string";
                         }
                         break;
-
-                    case "ZodNumber":
-                        fieldType = "number";
-                        break;
-
-                    case "ZodBoolean":
-                        fieldType = "boolean";
-                        break;
-
-                    case "ZodArray":
-                        fieldType = "array";
-                        break;
-
+                    case "ZodNumber":   fieldType = "number";  break;
+                    case "ZodBoolean":  fieldType = "boolean"; break;
+                    case "ZodArray":    fieldType = "array";   break;
                     case "ZodEnum":
                         fieldType = "string";
                         fieldSchema["enum"] = fieldDef?.values;
                         break;
-
                     case "ZodString":
                     default:
                         fieldType = "string";
                         break;
                 }
 
-                properties[key] = {
-                    type: fieldType,
-                    description,
-                    ...fieldSchema,
-                };
+                properties[key] = { type: fieldType, description, ...fieldSchema };
 
-                if (!isOptional) {
-                    required.push(key);
-                }
+                if (!isOptional) required.push(key);
             }
 
-            const schema: Record<string, unknown> = {
-                type: "object",
-                properties,
-            };
-
-            if (required.length > 0) {
-                schema["required"] = required;
-            }
+            const schema: Record<string, unknown> = { type: "object", properties };
+            if (required.length > 0) schema["required"] = required;
 
             return schema;
 
         } catch (error) {
             console.error("Error converting Zod schema:", error);
-            return {
-                type: "object",
-                properties: {},
-            };
+            return { type: "object", properties: {} };
         }
     }
 
@@ -330,13 +315,8 @@ export class MHTTPServer implements IServer {
             isError?: boolean;
         }>
     ): void {
-        this.registeredTools.set(toolName, {
-            config: configuration,
-            func: func,
-        });
-
+        this.registeredTools.set(toolName, { config: configuration, func });
         this.server.registerTool(toolName, configuration, func);
-
         console.log(`✅ Registered tool: ${toolName}`);
     }
 
