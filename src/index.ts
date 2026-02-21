@@ -9,11 +9,13 @@ import { DatabaseType } from "./database/databasefactory";
 import { DatabaseManager } from "./database/databasemanager";
 import { MHTTPServer } from "./mhttp/mhttpserver";
 import { ChartGenerator } from "./reports/chart_generator";
+import { JiraReader } from "./tools/jira_reader";
 
 // Choose which server to use based on environment variable
 const USE_HTTP = process.env.USE_HTTP === "true";
 const PORT = parseInt(process.env.PORT || "3000");
 const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
+
 
 async function run() {
   const dbConfig: DatabaseConfig = {
@@ -41,7 +43,7 @@ async function run() {
 
   console.log(`🚀 Starting ${USE_HTTP ? 'HTTP' : 'Stdio'} MCP Server...`);
 
-  // ===== REGISTER ALL TOOLS =====
+
 
   server.registerTools(
     "list_directory",
@@ -451,8 +453,123 @@ async function run() {
       }
     }
   );
+  server.registerTools(
+    "jira_story_description_update",
+    {
+      description: "Use this function to update the Description of the Jira Ticket",
+      inputSchema: z.object({
+        issueKey: z.string(),
+        descriptionToUpdate: z.string()
+      })
+    },
+    async ({ issueKey, descriptionToUpdate }: { issueKey: string, descriptionToUpdate: string }) => {
+      try {
+        const url = `https://nadeemowl.atlassian.net/rest/api/3/issue/${issueKey}`
+        const jiraReader = new JiraReader(url, "");
+        const response = await jiraReader.updateJira(issueKey, descriptionToUpdate);
+        return {
+          content: [{
+            type: "text",
+            text: `UPdated the jira story with ticket id ${response?.issueKey}`
+          }]
+        }
 
-  // 🔥 CHART GENERATION TOOL
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Something went wrong"
+            }
+          ],
+          isError: true
+        };
+
+      }
+
+    }
+  );
+
+  server.registerTools(
+    "jira_add_comment",
+    {
+      description: "Add a comment to a Jira issue. Use this when the user wants to comment on or update a Jira story.",
+      inputSchema: z.object({
+        issueKey: z.string().describe("Jira issue key e.g. JA-1"),
+        comment: z.string().describe("The comment text to add to the issue")
+      })
+    },
+    async ({ issueKey, comment }: { issueKey: string, comment: string }) => {
+      try {
+        console.log(`💬 Adding comment to ${issueKey}:`, comment);
+
+        const cleanId = issueKey.trim().toUpperCase();
+        const url = `https://nadeemowl.atlassian.net/rest/api/3/issue/${cleanId}`;
+
+        const jiraReader = new JiraReader(url, "");
+        const result = await jiraReader.addComment(cleanId, comment);
+
+        return {
+          content: [{
+            type: "text",
+            text: `✅ Comment added successfully to ${cleanId}. Comment ID: ${result.id}`
+          }]
+        };
+
+      } catch (error) {
+        console.error("❌ Add comment error:", error);
+        return {
+          content: [{
+            type: "text",
+            text: `Failed to add comment: ${(error as any).message}`
+          }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  server.registerTools(
+    "jira_story_reader",
+    {
+      description: "Read the jira story description and design the solution for it",
+      inputSchema: z.object({
+        issueKey: z.string()
+      })
+
+    },
+    async ({ issueKey }: { issueKey: string }) => {
+      try {
+        const cleanStoryId = issueKey.trim().toUpperCase();
+        const url = `https://nadeemowl.atlassian.net/rest/api/2/issue/${cleanStoryId}`.trim()
+        console.log(url)
+
+
+        const jiraReader = new JiraReader(url, "");
+        const response = await jiraReader.fetchDetails();
+        const description = response.fields.description ?? "No description"
+
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `${description}`
+            }
+          ]
+        }
+
+      } catch (error) {
+        console.error("❌ Jira tool error:", error); // ← THIS is the key log
+        return {
+          content: [{ type: "text", text: "Something went wrong" }],
+          isError: true
+        };
+
+      }
+
+    }
+  );
   server.registerTools(
     "generate_workorder_report_with_charts",
     {
@@ -464,7 +581,7 @@ async function run() {
     async ({ days = 30 }: { days?: number }) => {
       try {
         console.log(`📊 Starting chart generation for ${days} days...`);
-        
+
         const dbConnection = dbManager.getConnection("default");
         const chartGenerator = new ChartGenerator('./public/charts');
 
@@ -563,7 +680,7 @@ async function run() {
         );
         console.log(`✅ Doughnut chart: ${statusDoughnutPath}`);
 
-        // 🔥 Use absolute URLs with server URL
+        // 🔥 Build absolute URLs
         const statusChart = `${SERVER_URL}${statusChartPath}`;
         const priorityChart = `${SERVER_URL}${priorityChartPath}`;
         const timelineChart = `${SERVER_URL}${timelineChartPath}`;
@@ -571,42 +688,48 @@ async function run() {
 
         console.log('🎨 Chart URLs generated successfully');
 
-        // Generate HTML report
-        const htmlReport = `
-## 📊 Work Order Visual Report
+        // 🔥 FIXED: Proper markdown formatting with blank lines
+        const htmlReport = `## 📊 Work Order Visual Report
 
-**Period:** Last ${days} days  
-**Total Work Orders:** ${result.rowCount}  
+**Period:** Last ${days} days
+
+**Total Work Orders:** ${result.rowCount}
+
 **Generated:** ${new Date().toLocaleString()}
 
 ---
 
 ### Status Distribution
+
 ![Status Chart](${statusChart})
 
 ### Priority Breakdown
+
 ![Priority Chart](${priorityChart})
 
 ### Timeline
+
 ![Timeline Chart](${timelineChart})
 
-### Status Overview (Doughnut)
+### Status Overview
+
 ![Status Doughnut](${statusDoughnut})
 
 ---
 
-### Summary Statistics:
+### Summary Statistics
 
 **Status Breakdown:**
+
 ${Object.entries(statusCounts).map(([status, count]) => `- **${status}**: ${count}`).join('\n')}
 
 **Priority Breakdown:**
+
 ${Object.entries(priorityCounts).map(([priority, count]) => `- **${priority}**: ${count}`).join('\n')}
 
 ---
 
-*Charts are saved and available. Click on any chart above to view in full size.*
-        `;
+*Click on any chart above to view in full size.*`;
 
         console.log('✅ Report generation complete!');
 
@@ -622,7 +745,7 @@ ${Object.entries(priorityCounts).map(([priority, count]) => `- **${priority}**: 
         console.error('❌ Chart generation error:', err);
         return {
           content: [
-            { type: "text", text: `Error generating report: ${err.message}\n\nStack: ${err.stack}` },
+            { type: "text", text: `Error generating report: ${err.message}` },
           ],
           isError: true,
         };

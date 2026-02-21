@@ -1,43 +1,41 @@
 // mhttp/mhttpserver.ts
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import express, { Request, Response } from "express";
 import cors from "cors";
 import { ZodTypeAny } from "zod";
 import { IServer } from "../interfaces/iserver";
-import OpenAI from "openai";
 import dotenv from "dotenv";
-dotenv.config();
+import { ILLM, LLMMessage, Tool } from "../llm/interfaces/illm";
+import { LLMFactory } from "../llm/llm_factory/llm_factory";
 
+dotenv.config();
 
 export class MHTTPServer implements IServer {
     private server: McpServer;
     private app: express.Application;
     private port: number;
     private registeredTools: Map<string, any> = new Map();
-    private openai: OpenAI;
+    private llm: ILLM;
 
     constructor(port: number = 3000) {
         this.port = port;
         this.app = express();
-        this.openai = new OpenAI({
-            apiKey: process.env.OPENAI_API_KEY,
-        });
+        this.llm = LLMFactory.createFromEnv();
+        console.log(`🤖 Using LLM: ${this.llm.getProvider()} - ${this.llm.getModel()}`);
 
         this.app.use(cors({
-        origin: [
-            "http://localhost:5173",
-            "http://localhost:3000",  
-            "http://localhost:3001", 
-            "*"                       
-        ],
-        methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allowedHeaders: ["Content-Type", "Authorization", "Accept"],
-        credentials: false,
-    }));
-        this.app.use(express.json());
+            origin: [
+                "http://localhost:5173",
+                "http://localhost:3000",
+                "http://localhost:3001",
+                "*"
+            ],
+            methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            allowedHeaders: ["Content-Type", "Authorization", "Accept"],
+            credentials: false,
+        }));
 
-        // Serve static files
+        this.app.use(express.json());
         this.app.use(express.static('public'));
 
         this.server = new McpServer({
@@ -46,51 +44,24 @@ export class MHTTPServer implements IServer {
         });
 
         this.setupRoutes();
-        console.log("📋 Initializing MHTTPServer with OpenAI...");
+        console.log("📋 Initializing MHTTPServer...");
     }
 
     private setupRoutes() {
+        // Health check
         this.app.get("/health", (req: Request, res: Response) => {
             res.json({
                 status: "ok",
                 timestamp: new Date().toISOString(),
                 registeredTools: Array.from(this.registeredTools.keys()),
-            });
-        });
-        this.app.post("/sse", async (req: Request, res: Response) => {
-            console.log("📡 New SSE connection established");
-
-            res.setHeader("Content-Type", "text/event-stream");
-            res.setHeader("Cache-Control", "no-cache");
-            res.setHeader("Connection", "keep-alive");
-
-            try {
-                const transport = new SSEServerTransport("/message", res);
-                await this.server.connect(transport);
-                console.log("✅ MCP Server connected via SSE");
-            } catch (error) {
-                console.error("❌ SSE connection error:", error);
-                if (!res.headersSent) {
-                    res.status(500).json({ error: "Failed to establish SSE connection" });
-                }
-            }
-        });
-        this.app.get("/message", (req: Request, res: Response) => {
-            res.setHeader("Content-Type", "text/event-stream");
-            res.setHeader("Cache-Control", "no-cache");
-            res.setHeader("Connection", "keep-alive");
-            res.write(": ping\n\n");
-            const keepAlive = setInterval(() => {
-                res.write(": ping\n\n");
-            }, 30000);
-
-            req.on("close", () => {
-                clearInterval(keepAlive);
+                llmProvider: this.llm.getProvider(),
+                llmModel: this.llm.getModel(),
             });
         });
 
+        // 🔥 Main chat endpoint with LLM interface
         this.app.post("/api/chat/chat_stream", async (req: Request, res: Response) => {
-            const { question } = req.body;
+            const { question, history } = req.body;
 
             if (!question) {
                 return res.status(400).json({ error: "Question is required" });
@@ -103,7 +74,7 @@ export class MHTTPServer implements IServer {
             res.setHeader("Connection", "keep-alive");
 
             try {
-                await this.handleWithOpenAIAndMCP(question, res);
+                await this.handleWithLLMAndMCP(question, history || [], res);
             } catch (error: any) {
                 console.error("❌ Chat error:", error);
                 res.write(`data: ${JSON.stringify("Sorry, I encountered an error: " + error.message)}\n\n`);
@@ -111,42 +82,63 @@ export class MHTTPServer implements IServer {
                 res.end();
             }
         });
+
+        // List available tools
         this.app.get("/api/tools", async (req: Request, res: Response) => {
             try {
                 const tools = Array.from(this.registeredTools.entries()).map(([name, tool]) => ({
                     name,
                     description: tool.config.description,
                 }));
-                res.json({ tools });
+                res.json({
+                    tools,
+                    llmProvider: this.llm.getProvider(),
+                    llmModel: this.llm.getModel(),
+                });
             } catch (error: any) {
                 res.status(500).json({ error: error.message });
             }
         });
     }
-    private async handleWithOpenAIAndMCP(question: string, res: Response): Promise<void> {
-        const openAITools: OpenAI.Chat.ChatCompletionTool[] = Array.from(
-            this.registeredTools.entries()
-        ).map(([name, tool]) => ({
-            type: "function" as const,
-            function: {
-                name: name,
-                description: tool.config.description,
-                parameters: this.zodToJsonSchema(tool.config.inputSchema) as OpenAI.FunctionParameters,
-            },
-        }));
-        console.log(`🤖 Sending to OpenAI with ${openAITools.length} tools available`);
-        const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+
+    // 🔥 Refactored to use LLM interface
+    private async handleWithLLMAndMCP(
+        question: string,
+        history: Array<{ role: string; content: string }>,
+        res: Response
+    ): Promise<void> {
+        // 🔥 Build tools in generic format
+        const tools: Tool[] = Array.from(this.registeredTools.entries()).map(
+            ([name, tool]) => ({
+                type: 'function' as const,
+                function: {
+                    name,
+                    description: tool.config.description,
+                    parameters: this.zodToJsonSchema(tool.config.inputSchema),
+                },
+            })
+        );
+
+        console.log(`🤖 Sending to ${this.llm.getProvider()} with ${tools.length} tools available`);
+
+        // 🔥 Build messages in generic format
+        const messages: LLMMessage[] = [
             {
-                role: "system",
+                role: 'system',
                 content: `You are a helpful work order management assistant.
-                        You have access to tools that can query work orders, generate statistics, and create visual reports with charts.
-                        When users ask about work orders, always use the appropriate tools to get accurate real-time data.
-                        When users ask for charts, graphs, pie charts, bar charts, or visual reports, always use the generate_workorder_report_with_charts tool.
-                        Always provide helpful, accurate responses based on the actual data from the tools.
-                        Format your responses clearly using markdown.`,
+                            You have access to tools that can query work orders, generate statistics, and create visual reports with charts.
+                            When users ask about work orders, always use the appropriate tools to get accurate real-time data.
+                            When users ask for charts, graphs, pie charts, bar charts, or visual reports, always use the generate_workorder_report_with_charts tool.
+                            Always provide helpful, accurate responses based on the actual data from the tools.
+                            Format your responses clearly using markdown.`,
             },
+            // 🔥 Include conversation history
+            ...history.map((msg) => ({
+                role: msg.role as 'user' | 'assistant',
+                content: msg.content,
+            })),
             {
-                role: "user",
+                role: 'user' as const,
                 content: question,
             },
         ];
@@ -154,78 +146,70 @@ export class MHTTPServer implements IServer {
         let continueLoop = true;
 
         while (continueLoop) {
-            // Step 3: Call OpenAI with tools
-            const response = await this.openai.chat.completions.create({
-                model: "gpt-4o",
-                messages: messages,
-                tools: openAITools,
-                tool_choice: "auto",
-                max_tokens: 4096,
-            });
+            for await (const chunk of this.llm.streamChat(messages, tools)) {
 
-            const responseMessage = response.choices[0].message;
-            const finishReason = response.choices[0].finish_reason;
-
-            console.log(`OpenAI response - Finish reason: ${finishReason}`);
-            messages.push(responseMessage);
-
-            if (finishReason === "tool_calls" && responseMessage.tool_calls) {
-                if (responseMessage.content) {
-                    const words = responseMessage.content.split(' ');
-                    for (let i = 0; i < words.length; i++) {
-                        const word = words[i] + (i < words.length - 1 ? ' ' : '');
-                        res.write(`data: ${JSON.stringify(word)}\n\n`);
-                        await new Promise(resolve => setTimeout(resolve, 20));
-                    }
+                if (chunk.content) {
+                    res.write(`data: ${JSON.stringify(chunk.content)}\n\n`);
                 }
-                for (const toolCall of responseMessage.tool_calls) {
-                    if (toolCall.type !== "function") continue;
+                if (chunk.isToolCall && chunk.toolCalls) {
+                    // Add assistant message with tool calls
+                    messages.push({
+                        role: 'assistant',
+                        content: '',
+                        tool_calls: chunk.toolCalls,
+                    });
 
-                    const toolName = toolCall.function.name;
-                    const toolInput = JSON.parse(toolCall.function.arguments);
+                    // Execute each tool
+                    for (const toolCall of chunk.toolCalls) {
+                        const toolName = toolCall.function.name;
+                        let toolInput: any;
 
-                    console.log(`🔧 OpenAI calling tool: ${toolName}`);
-                    console.log(`📥 Tool input:`, toolInput);
-                    const toolMsg = `\n\n*🔧 Using tool: ${toolName}...*\n\n`;
-                    res.write(`data: ${JSON.stringify(toolMsg)}\n\n`);
-
-                    let toolResultContent = "";
-
-                    try {
-                        const tool = this.registeredTools.get(toolName);
-                        if (!tool) {
-                            throw new Error(`Tool ${toolName} not found`);
+                        try {
+                            toolInput = JSON.parse(toolCall.function.arguments);
+                        } catch (parseError) {
+                            console.error(`Failed to parse tool arguments for ${toolName}:`, toolCall.function.arguments);
+                            toolInput = {};
                         }
 
-                        const toolResult = await tool.func(toolInput);
-                        toolResultContent = toolResult.content[0]?.text || "No result";
+                        console.log(`🔧 Calling tool: ${toolName}`);
+                        console.log(`📥 Tool input:`, toolInput);
 
-                        console.log(`✅ Tool ${toolName} completed successfully`);
-                    } catch (toolError: any) {
-                        console.error(`Tool ${toolName} failed:`, toolError);
-                        toolResultContent = `Error executing tool: ${toolError.message}`;
+                        // Stream tool usage indicator
+                        const toolMsg = `\n\n*🔧 Using tool: ${toolName}...*\n\n`;
+                        res.write(`data: ${JSON.stringify(toolMsg)}\n\n`);
+
+                        let toolResultContent = "";
+
+                        try {
+                            const tool = this.registeredTools.get(toolName);
+                            if (!tool) {
+                                throw new Error(`Tool ${toolName} not found`);
+                            }
+
+                            const toolResult = await tool.func(toolInput);
+                            toolResultContent = toolResult.content[0]?.text || "No result";
+
+                            console.log(`✅ Tool ${toolName} completed successfully`);
+                        } catch (toolError: any) {
+                            console.error(`❌ Tool ${toolName} failed:`, toolError);
+                            toolResultContent = `Error executing tool: ${toolError.message}`;
+                        }
+
+                        // Add tool result to messages
+                        messages.push({
+                            role: 'tool',
+                            content: toolResultContent,
+                            tool_call_id: toolCall.id,
+                        });
                     }
-
-                    // Add tool result to messages
-                    messages.push({
-                        role: "tool",
-                        tool_call_id: toolCall.id,
-                        content: toolResultContent,
-                    });
                 }
 
-            } else if (finishReason === "stop") {
-                if (responseMessage.content) {
-                    const words = responseMessage.content.split(' ');
-                    for (let i = 0; i < words.length; i++) {
-                        const word = words[i] + (i < words.length - 1 ? ' ' : '');
-                        res.write(`data: ${JSON.stringify(word)}\n\n`);
-                        await new Promise(resolve => setTimeout(resolve, 20));
-                    }
+                // Check if we're done
+                if (chunk.isDone) {
+                    // If this was a tool call, continue the loop to get LLM's response
+                    continueLoop = chunk.isToolCall;
+                    break; 
                 }
-                continueLoop = false;
-            } else {
-                continueLoop = false;
             }
         }
 
@@ -237,7 +221,8 @@ export class MHTTPServer implements IServer {
     private zodToJsonSchema(zodSchema: ZodTypeAny): Record<string, unknown> {
         try {
             const schemaDef = zodSchema._def as any;
-            const shape = schemaDef?.shape?.();
+            // const shape = schemaDef?.shape?.();
+            const shape = schemaDef?.shape; // ✅ no parentheses
 
             if (!shape) {
                 return {
@@ -311,6 +296,7 @@ export class MHTTPServer implements IServer {
                     description,
                     ...fieldSchema,
                 };
+
                 if (!isOptional) {
                     required.push(key);
                 }
@@ -351,17 +337,18 @@ export class MHTTPServer implements IServer {
 
         this.server.registerTool(toolName, configuration, func);
 
-        console.log(`Registered tool: ${toolName}`);
+        console.log(`✅ Registered tool: ${toolName}`);
     }
 
     async start() {
         this.app.listen(this.port, () => {
-            console.log(`\n HTTP MCP Server running on http://localhost:${this.port}`);
-            console.log(`SSE endpoint: POST http://localhost:${this.port}/sse`);
-            console.log(`Chat endpoint: POST http://localhost:${this.port}/api/chat/chat_stream`);
-            console.log(`Tools endpoint: GET http://localhost:${this.port}/api/tools`);
-            console.log(` Health check: GET http://localhost:${this.port}/health`);
-            console.log(`\nRegistered ${this.registeredTools.size} tools:`);
+            console.log(`\n🚀 HTTP MCP Server running on http://localhost:${this.port}`);
+            console.log(`🤖 LLM Provider: ${this.llm.getProvider()}`);
+            console.log(`🎯 Model: ${this.llm.getModel()}`);
+            console.log(`💬 Chat endpoint: POST http://localhost:${this.port}/api/chat/chat_stream`);
+            console.log(`📋 Tools endpoint: GET http://localhost:${this.port}/api/tools`);
+            console.log(`❤️  Health check: GET http://localhost:${this.port}/health`);
+            console.log(`\n📦 Registered ${this.registeredTools.size} tools:`);
             Array.from(this.registeredTools.keys()).forEach((tool, index) => {
                 console.log(`   ${index + 1}. ${tool}`);
             });
