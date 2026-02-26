@@ -129,8 +129,6 @@ export class OpenAIProvider implements ILLM {
         for await (const chunk of stream) {
             const delta = chunk.choices[0]?.delta;
             const finishReason = chunk.choices[0]?.finish_reason;
-
-            // Handle content
             if (delta?.content) {
                 yield {
                     content: delta.content,
@@ -138,8 +136,6 @@ export class OpenAIProvider implements ILLM {
                     isDone: false,
                 };
             }
-
-            // Handle tool calls
             if (delta?.tool_calls) {
                 for (const toolCall of delta.tool_calls) {
                     if (toolCall.type && toolCall.type !== 'function') continue;
@@ -166,8 +162,6 @@ export class OpenAIProvider implements ILLM {
                     }
                 }
             }
-
-            // Check if done
             if (finishReason) {
                 const toolCallsArray = Array.from(accumulatedToolCalls.values());
                 yield {
@@ -185,10 +179,10 @@ export class OpenAIProvider implements ILLM {
      */
     async generateEmbedding(text: string): Promise<number[]> {
         const response = await this.client.embeddings.create({
-            model: 'text-embedding-3-small',
+            model: 'text-embedding-3-large',
             input: text,
         });
 
-        return response.data[0].embedding;
+        return response.data[0].embedding??[];
     }
 }

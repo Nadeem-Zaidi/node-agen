@@ -60,20 +60,26 @@ export class MHTTPServer implements IServer {
             });
         });
         this.app.post("/api/chat/chat_stream", async (req: Request, res: Response) => {
-            const { question, images, history } = req.body;
+            const { question, history, images } = req.body;
             if (!question && (!images || images.length === 0)) {
-                return res.status(400).send("Questions or images required for chating");
-            }
-            res.setHeader("Content-Type","text/event-stream");
-            res.setHeader("Cache-Control","no-cache");
-            res.setHeader("Connection","keep-alive");
-
-            try{
-                await this.handleWithLLMAndMCP(question||"",history||[],images||[],res);
-            }catch(error){
-
+                return res.status(400).json({ error: "Question or images are required" });
             }
 
+            console.log(`💬 User question: ${question}`);
+            console.log(`🖼️  Images received: ${images?.length || 0}`);
+
+            res.setHeader("Content-Type", "text/event-stream");
+            res.setHeader("Cache-Control", "no-cache");
+            res.setHeader("Connection", "keep-alive");
+
+            try {
+                await this.handleWithLLMAndMCP(question || "", history || [], images || [], res);
+            } catch (error: any) {
+                console.error("❌ Chat error:", error);
+                res.write(`data: ${JSON.stringify("Sorry, I encountered an error: " + error.message)}\n\n`);
+                res.write(`data: [DONE]\n\n`);
+                res.end();
+            }
         });
         this.app.get("/api/tools", async (req: Request, res: Response) => {
             try {
@@ -133,21 +139,13 @@ export class MHTTPServer implements IServer {
             {
                 role: 'system',
                 content: `You are a helpful work order management assistant.
-                        You have access to tools that can query work orders, generate statistics, and create visual reports with charts and ask_documentation using rag.
-                        When users ask about work orders, always use the appropriate tools to get accurate real-time data.
-                        When users ask for charts, graphs, pie charts, bar charts, or visual reports, always use the generate_workorder_report_with_charts tool.
-                        Always provide helpful, accurate responses based on the actual data from the tools.
-                        Format your responses clearly using markdown.
-
-                        DOCUMENTATION RULES (STRICT):
-                        - When using the ask_documentation tool, you MUST answer ONLY from the context returned by the tool.
-                        - Do NOT use your own training knowledge to answer documentation questions.
-                        - Do NOT add extra information, assumptions, or guesses beyond what the context provides.
-                        - If the context does not contain the answer, respond with exactly: "I don't have enough information in the documentation to answer this." Do NOT try to answer anyway.
-                        - Do NOT mix work order data with documentation answers — keep them separate.
-                        - If the user asks a follow-up documentation question, call ask_documentation again with the new question — do NOT rely on previous context.
-                        - Always quote or reference the section heading from the documentation when answering, so the user knows where the answer came from.`
+                            You have access to tools that can query work orders, generate statistics, and create visual reports with charts.
+                            When users ask about work orders, always use the appropriate tools to get accurate real-time data.
+                            When users ask for charts, graphs, pie charts, bar charts, or visual reports, always use the generate_workorder_report_with_charts tool.
+                            Always provide helpful, accurate responses based on the actual data from the tools.
+                            Format your responses clearly using markdown.`,
             },
+            // Include conversation history
             ...history.map((msg) => ({
                 role: msg.role as 'user' | 'assistant',
                 content: msg.content,
@@ -253,9 +251,9 @@ export class MHTTPServer implements IServer {
                         const innerDef = fieldDef?.innerType?._def;
                         const innerTypeName = innerDef?.typeName as string;
                         switch (innerTypeName) {
-                            case "ZodNumber": fieldType = "number"; break;
-                            case "ZodBoolean": fieldType = "boolean"; break;
-                            case "ZodArray": fieldType = "array"; break;
+                            case "ZodNumber":   fieldType = "number";  break;
+                            case "ZodBoolean":  fieldType = "boolean"; break;
+                            case "ZodArray":    fieldType = "array";   break;
                             case "ZodEnum":
                                 fieldType = "string";
                                 fieldSchema["enum"] = innerDef?.values;
@@ -263,9 +261,9 @@ export class MHTTPServer implements IServer {
                             default: fieldType = "string";
                         }
                         break;
-                    case "ZodNumber": fieldType = "number"; break;
-                    case "ZodBoolean": fieldType = "boolean"; break;
-                    case "ZodArray": fieldType = "array"; break;
+                    case "ZodNumber":   fieldType = "number";  break;
+                    case "ZodBoolean":  fieldType = "boolean"; break;
+                    case "ZodArray":    fieldType = "array";   break;
                     case "ZodEnum":
                         fieldType = "string";
                         fieldSchema["enum"] = fieldDef?.values;

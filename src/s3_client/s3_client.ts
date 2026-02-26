@@ -10,6 +10,7 @@ export interface S3File {
   key: string;
   size: number;
   lastModified?: Date;
+  
 }
 
 export class S3_Client {
@@ -35,8 +36,8 @@ export class S3_Client {
       new ListObjectsV2Command({
         Bucket: this.bucket,
         Prefix: this.prefix,
-        ContinuationToken: token,
-        MaxKeys: 50,
+          ContinuationToken: token,
+          MaxKeys: 50,
       })
     );
 
